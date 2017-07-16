@@ -1,10 +1,11 @@
 from __future__ import print_function, division, absolute_import
 
+import asyncio
 from collections import deque
 import logging
 
-from tornado import gen, locks
-from tornado.ioloop import IOLoop
+# from tornado import gen, locks
+# from tornado.ioloop import IOLoop
 
 from .core import CommClosedError
 from .utils import ignoring
@@ -62,11 +63,10 @@ class BatchedSend(object):
 
     __repr__ = __str__
 
-    @gen.coroutine
-    def _background_send(self):
+    async def _background_send(self):
         while not self.please_stop:
-            with ignoring(gen.TimeoutError):
-                yield self.waker.wait(self.next_deadline)
+            with ignoring(asyncio.TimeoutError):
+                await self.waker.wait(self.next_deadline)
                 self.waker.clear()
             if not self.buffer:
                 # Nothing to send
@@ -81,7 +81,7 @@ class BatchedSend(object):
             self.next_deadline = self.loop.time() + self.interval
             try:
                 self.recent_message_log.append(payload)
-                nbytes = yield self.comm.write(payload)
+                nbytes = await self.comm.write(payload)
                 self.byte_count += nbytes
             except CommClosedError as e:
                 logger.info("Batched Comm Closed: %s", e)
@@ -106,22 +106,21 @@ class BatchedSend(object):
         if self.next_deadline is None:
             self.waker.set()
 
-    @gen.coroutine
-    def close(self):
+    async def close(self):
         """ Flush existing messages and then close comm """
         if self.comm is None:
             return
         self.please_stop = True
         self.waker.set()
-        yield self.stopped.wait()
+        await self.stopped.wait()
         if not self.comm.closed():
             try:
                 if self.buffer:
                     self.buffer, payload = [], self.buffer
-                    yield self.comm.write(payload)
+                    await self.comm.write(payload)
             except CommClosedError:
                 pass
-            yield self.comm.close()
+            await self.comm.close()
 
     def abort(self):
         if self.comm is None:

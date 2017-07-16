@@ -8,8 +8,9 @@ from time import sleep
 import warnings
 import weakref
 
-from tornado import gen
-from tornado.ioloop import IOLoop
+import asyncio
+# from tornado import gen
+# from tornado.ioloop import IOLoop
 
 from ..core import CommClosedError
 from ..utils import sync, ignoring, All, silence_logging
@@ -125,8 +126,7 @@ class LocalCluster(object):
 
     __repr__ = __str__
 
-    @gen.coroutine
-    def _start(self, ip=None):
+    async def _start(self, ip=None):
         """
         Start all cluster services.
         Wait on this if you passed `start=False` to the LocalCluster
@@ -143,18 +143,16 @@ class LocalCluster(object):
             scheduler_address = (ip, self.scheduler_port)
         self.scheduler.start(scheduler_address)
 
-        yield self._start_all_workers(
+        await self._start_all_workers(
             self.n_workers, ncores=self.threads_per_worker,
             services=self.worker_services, **self.worker_kwargs)
 
         self.status = 'running'
 
-    @gen.coroutine
-    def _start_all_workers(self, n_workers, **kwargs):
-        yield [self._start_worker(**kwargs) for i in range(n_workers)]
+    async def _start_all_workers(self, n_workers, **kwargs):
+        await asyncio.wait(*[self._start_worker(**kwargs) for _ in range(n_workers)])
 
-    @gen.coroutine
-    def _start_worker(self, port=0, processes=None, death_timeout=60, **kwargs):
+    async def _start_worker(self, port=0, processes=None, death_timeout=60, **kwargs):
         if processes is not None:
             raise ValueError("overriding `processes` for individual workers "
                              "in a LocalCluster is not supported anymore")
@@ -170,14 +168,14 @@ class LocalCluster(object):
         w = W(self.scheduler.address, loop=self.loop,
               death_timeout=death_timeout,
               silence_logs=self.silence_logs, **kwargs)
-        yield w._start()
+        await w._start()
 
         self.workers.append(w)
 
         while w.worker_address not in self.scheduler.worker_info:
-            yield gen.sleep(0.01)
+            await asyncio.sleep(0.01)
 
-        raise gen.Return(w)
+        return w
 
     def start_worker(self, ncores=0, **kwargs):
         """ Add a new worker to the running cluster
@@ -200,9 +198,8 @@ class LocalCluster(object):
         """
         return sync(self.loop, self._start_worker, ncores=ncores, **kwargs)
 
-    @gen.coroutine
-    def _stop_worker(self, w):
-        yield w._close()
+    async def _stop_worker(self, w):
+        await w._close()
         if w in self.workers:
             self.workers.remove(w)
 
@@ -217,15 +214,14 @@ class LocalCluster(object):
         """
         sync(self.loop, self._stop_worker, w)
 
-    @gen.coroutine
-    def _close(self):
+    async def _close(self):
         if self.status == 'closed':
             return
 
-        with ignoring(gen.TimeoutError, CommClosedError, OSError):
-            yield All([w._close() for w in self.workers])
-        with ignoring(gen.TimeoutError, CommClosedError, OSError):
-            yield self.scheduler.close(fast=True)
+        with ignoring(asyncio.TimeoutError, CommClosedError, OSError):
+            await All([w._close() for w in self.workers])
+        with ignoring(asyncio.TimeoutError, CommClosedError, OSError):
+            await self.scheduler.close(fast=True)
         del self.workers[:]
         self.status = 'closed'
 
@@ -249,8 +245,7 @@ class LocalCluster(object):
             self.loop.close()
             del self._thread
 
-    @gen.coroutine
-    def scale_up(self, n, **kwargs):
+    async def scale_up(self, n, **kwargs):
         """ Bring the total count of workers up to ``n``
 
         This function/coroutine should bring the total number of workers up to
@@ -258,11 +253,9 @@ class LocalCluster(object):
 
         This can be implemented either as a function or as a Tornado coroutine.
         """
-        yield [self._start_worker(**kwargs)
-               for i in range(n - len(self.workers))]
+        await asyncio.wait(*[self._start_worker(**kwargs) for _ in range(n - len(self.workers))])
 
-    @gen.coroutine
-    def scale_down(self, workers):
+    async def scale_down(self, workers):
         """ Remove ``workers`` from the cluster
 
         Given a list of worker addresses this function should remove those
@@ -272,11 +265,12 @@ class LocalCluster(object):
         This can be implemented either as a function or as a Tornado coroutine.
         """
         workers = set(workers)
-        yield [self._stop_worker(w)
+        futs = [self._stop_worker(w)
                 for w in self.workers
                 if w.worker_address in workers]
+        await asyncio.wait(futs)
         while workers & set(self.workers):
-            yield gen.sleep(0.01)
+            await asyncio.sleep(0.01)
 
     def __del__(self):
         self.close()

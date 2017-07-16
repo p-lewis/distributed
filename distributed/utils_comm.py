@@ -1,11 +1,9 @@
 from __future__ import print_function, division, absolute_import
 
+import asyncio
 from collections import defaultdict
 from itertools import cycle
 import random
-
-from tornado import gen
-from tornado.gen import Return
 
 from toolz import merge, concat, groupby, drop
 
@@ -16,7 +14,7 @@ from .utils import All, tokey
 no_default = '__no_default__'
 
 
-@gen.coroutine
+@asyncio.coroutine
 def gather_from_workers(who_has, rpc, close=True):
     """ Gather data directly from peers
 
@@ -76,7 +74,7 @@ def gather_from_workers(who_has, rpc, close=True):
         results.update(response)
 
     bad_keys = {k: list(original_who_has[k]) for k in all_bad_keys}
-    raise Return((results, bad_keys, list(missing_workers)))
+    return results, bad_keys, list(missing_workers)
 
 
 class WrappedKey(object):
@@ -96,7 +94,7 @@ class WrappedKey(object):
 _round_robin_counter = [0]
 
 
-@gen.coroutine
+@asyncio.coroutine
 def scatter_to_workers(ncores, data, rpc=rpc, report=True):
     """ Scatter data directly to workers
 
@@ -131,7 +129,7 @@ def scatter_to_workers(ncores, data, rpc=rpc, report=True):
 
     who_has = {k: [w for w, _, _ in v] for k, v in groupby(1, L).items()}
 
-    raise Return((names, who_has, nbytes))
+    return names, who_has, nbytes
 
 
 collection_types = (tuple, list, set, frozenset)

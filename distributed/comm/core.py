@@ -6,7 +6,8 @@ import logging
 
 from six import with_metaclass
 
-from tornado import gen
+# from tornado import gen
+import asyncio
 
 from ..config import config
 from ..metrics import time
@@ -152,7 +153,7 @@ class Connector(with_metaclass(ABCMeta)):
         """
 
 
-@gen.coroutine
+@asyncio.coroutine
 def connect(addr, timeout=None, deserialize=True, connection_args=None):
     """
     Connect to the given address (a URI such as ``tcp://127.0.0.1:1234``)

@@ -7,8 +7,8 @@ from functools import wraps
 
 from toolz import merge
 
-from tornado.platform.asyncio import BaseAsyncIOLoop
-from tornado.platform.asyncio import to_asyncio_future
+# from tornado.platform.asyncio import BaseAsyncIOLoop
+# from tornado.platform.asyncio import to_asyncio_future
 
 from . import client
 from .client import Client, Future

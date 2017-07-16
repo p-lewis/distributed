@@ -13,11 +13,12 @@ import click
 from distributed import Scheduler
 from distributed.security import Security
 from distributed.utils import ignoring, open_port, get_ip_interface
-from distributed.http import HTTPScheduler
+from distributed.http import scheduler_app
 from distributed.cli.utils import (check_python_3, install_signal_handlers,
-                                   uri_from_host_port)
+                                   uri_from_host_port, set_asyncio_policy)
 from distributed.preloading import preload_modules
-from tornado.ioloop import IOLoop
+import asyncio
+# from tornado.ioloop import IOLoop
 
 logger = logging.getLogger('distributed.scheduler')
 
@@ -118,7 +119,7 @@ def main(host, port, http_port, bokeh_port, bokeh_internal_port, show, _bokeh,
 
     addr = uri_from_host_port(host, port, 8786)
 
-    loop = IOLoop.current()
+    loop = asyncio.get_event_loop()
     logger.info('-' * 47)
 
     services = {('http', http_port): HTTPScheduler}
@@ -136,7 +137,7 @@ def main(host, port, http_port, bokeh_port, bokeh_internal_port, show, _bokeh,
     logger.info('Local Directory: %26s', local_directory)
     logger.info('-' * 47)
     try:
-        loop.start()
+        loop.run_forever()
         loop.close()
     finally:
         scheduler.stop()
@@ -147,6 +148,7 @@ def main(host, port, http_port, bokeh_port, bokeh_internal_port, show, _bokeh,
 
 
 def go():
+    set_asyncio_policy()
     install_signal_handlers()
     check_python_3()
     main()

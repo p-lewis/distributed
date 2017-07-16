@@ -7,19 +7,18 @@ import six
 
 from toolz import merge
 
-from tornado import gen
+# from tornado import gen
 
 from .metrics import time
 from .utils import sync
 
 
-@gen.coroutine
-def _cascade_future(future, cf_future):
+async def _cascade_future(future, cf_future):
     """
     Coroutine that waits on Dask future, then transmits its outcome to
     cf_future.
     """
-    result = yield future._result(raiseit=False)
+    result = await future._result(raiseit=False)
     status = future.status
     if status == 'finished':
         cf_future.set_result(result)
@@ -34,11 +33,10 @@ def _cascade_future(future, cf_future):
             cf_future.set_exception(exc)
 
 
-@gen.coroutine
-def _wait_on_futures(futures):
+async def _wait_on_futures(futures):
     for fut in futures:
         try:
-            yield fut
+            await fut
         except Exception:
             pass
 

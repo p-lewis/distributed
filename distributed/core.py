@@ -10,10 +10,10 @@ import uuid
 from six import string_types
 
 from toolz import assoc
-
-from tornado import gen
-from tornado.ioloop import IOLoop, PeriodicCallback
-from tornado.locks import Event
+import asyncio
+# from tornado import gen
+# from tornado.ioloop import IOLoop, PeriodicCallback
+# from tornado.locks import Event
 
 from .comm import (connect, listen, CommClosedError,
                    normalize_address,
@@ -21,6 +21,7 @@ from .comm import (connect, listen, CommClosedError,
 from .metrics import time
 from .system_monitor import SystemMonitor
 from .utils import get_traceback, truncate_exception, ignoring, shutting_down
+# from .tornado_shim import periodic
 from . import protocol
 
 
@@ -96,7 +97,7 @@ class Server(object):
         self.event_counts = None
 
         self.listener = None
-        self.io_loop = io_loop or IOLoop.current()
+        self.io_loop = io_loop or asyncio.get_event_loop()
 
         # Statistics counters for various events
         with ignoring(ImportError):
@@ -205,8 +206,7 @@ class Server(object):
                                connection_args=listen_args)
         self.listener.start()
 
-    @gen.coroutine
-    def handle_comm(self, comm, shutting_down=shutting_down):
+    async def handle_comm(self, comm, shutting_down=shutting_down):
         """ Dispatch new communications to coroutine-handlers
 
         Handlers is a dictionary mapping operation names to functions or
@@ -228,7 +228,7 @@ class Server(object):
         try:
             while True:
                 try:
-                    msg = yield comm.read()
+                    msg = await comm.read()
                     logger.debug("Message from %r: %s", address, msg)
                 except EnvironmentError as e:
                     if not shutting_down():
@@ -238,7 +238,7 @@ class Server(object):
                     break
                 except Exception as e:
                     logger.exception(e)
-                    yield comm.write(error_message(e, status='uncaught-error'))
+                    await comm.write(error_message(e, status='uncaught-error'))
                     continue
                 if not isinstance(msg, dict):
                     raise TypeError("Bad message type.  Expected dict, got\n  "
@@ -251,7 +251,7 @@ class Server(object):
                 reply = msg.pop('reply', True)
                 if op == 'close':
                     if reply:
-                        yield comm.write('OK')
+                        await comm.write('OK')
                     break
                 try:
                     handler = self.handlers[op]
@@ -272,14 +272,14 @@ class Server(object):
                         result = error_message(e, status='uncaught-error')
                 if reply and result != 'dont-reply':
                     try:
-                        yield comm.write(result)
+                        await comm.write(result)
                     except EnvironmentError as e:
                         logger.warning("Lost connection to %r while sending result for op %r: %s",
                                        address, op, e)
                         break
                 msg = result = None
                 if close_desired:
-                    yield comm.close()
+                    await comm.close()
                 if comm.closed():
                     break
 
@@ -297,8 +297,7 @@ def pingpong(comm):
     return b'pong'
 
 
-@gen.coroutine
-def send_recv(comm, reply=True, deserialize=True, **kwargs):
+async def send_recv(comm, reply=True, deserialize=True, **kwargs):
     """ Send and recv with a Comm.
 
     Keyword arguments turn into the message
@@ -311,9 +310,9 @@ def send_recv(comm, reply=True, deserialize=True, **kwargs):
     force_close = False
 
     try:
-        yield comm.write(msg)
+        await comm.write(msg)
         if reply:
-            response = yield comm.read()
+            response = await comm.read()
         else:
             response = None
     except EnvironmentError:
@@ -322,7 +321,7 @@ def send_recv(comm, reply=True, deserialize=True, **kwargs):
         raise
     finally:
         if please_close:
-            yield comm.close()
+            await comm.close()
         elif force_close:
             comm.abort()
 
@@ -369,8 +368,7 @@ class rpc(object):
         self.connection_args = connection_args
         rpc.active += 1
 
-    @gen.coroutine
-    def live_comm(self):
+    async def live_comm(self):
         """ Get an open communication
 
         Some comms to the ip/port target may be in current use by other
@@ -400,11 +398,11 @@ class rpc(object):
         for s in to_clear:
             del self.comms[s]
         if not open or comm.closed():
-            comm = yield connect(self.address, self.timeout,
+            comm = await connect(self.address, self.timeout,
                                  deserialize=self.deserialize,
                                  connection_args=self.connection_args)
         self.comms[comm] = False     # mark as taken
-        raise gen.Return(comm)
+        return comm
 
     def close_comms(self):
 
@@ -555,8 +553,7 @@ class ConnectionPool(object):
         addr = addr_from_args(addr=addr, ip=ip, port=port)
         return PooledRPCCall(addr, self)
 
-    @gen.coroutine
-    def connect(self, addr, timeout=None):
+    async def connect(self, addr, timeout=None):
         """
         Get a Comm to the given address.  For internal use.
         """
@@ -567,18 +564,18 @@ class ConnectionPool(object):
             if not comm.closed():
                 self.active += 1
                 occupied.add(comm)
-                raise gen.Return(comm)
+                return comm
             else:
                 self.open -= 1
 
         while self.open >= self.limit:
             self.event.clear()
             self.collect()
-            yield self.event.wait()
+            await self.event.wait()
 
         self.open += 1
         try:
-            comm = yield connect(addr, timeout=timeout,
+            comm = await connect(addr, timeout=timeout,
                                  deserialize=self.deserialize,
                                  connection_args=self.connection_args)
         except Exception:
@@ -590,7 +587,7 @@ class ConnectionPool(object):
         if self.open >= self.limit:
             self.event.clear()
 
-        raise gen.Return(comm)
+        return comm
 
     def reuse(self, addr, comm):
         """

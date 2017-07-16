@@ -4,8 +4,8 @@ from collections import defaultdict
 import logging
 import uuid
 
-from tornado import gen
-import tornado.queues
+# from tornado import gen
+# import tornado.queues
 
 try:
     from cytoolz import assoc
@@ -62,15 +62,14 @@ class QueueExtension(object):
             self.scheduler.client_releases_keys(keys=[f.key for f in futures],
                                                 client='queue-%s' % name)
 
-    @gen.coroutine
-    def put(self, stream=None, name=None, key=None, data=None, client=None, timeout=None):
+    async def put(self, stream=None, name=None, key=None, data=None, client=None, timeout=None):
         if key is not None:
             record = {'type': 'Future', 'value': key}
             self.future_refcount[name, key] += 1
             self.scheduler.client_desires_keys(keys=[key], client='queue-%s' % name)
         else:
             record = {'type': 'msgpack', 'value': data}
-        yield self.queues[name].put(record, timeout=timeout)
+        await self.queues[name].put(record, timeout=timeout)
 
     def future_release(self, name=None, key=None, client=None):
         self.future_refcount[name, key] -= 1
@@ -79,8 +78,7 @@ class QueueExtension(object):
                                                 client='queue-%s' % name)
             del self.future_refcount[name, key]
 
-    @gen.coroutine
-    def get(self, stream=None, name=None, client=None, timeout=None,
+    async def get(self, stream=None, name=None, client=None, timeout=None,
             batch=False):
         def process(record):
             """ Add task status if known """
@@ -98,7 +96,7 @@ class QueueExtension(object):
             out = []
             if batch is True:
                 while not q.empty():
-                    record = yield q.get()
+                    record = await q.get()
                     out.append(record)
             else:
                 if timeout is not None:
@@ -106,14 +104,14 @@ class QueueExtension(object):
                            "integer batch sizes and timeouts")
                     raise NotImplementedError(msg)
                 for i in range(batch):
-                    record = yield q.get()
+                    record = await q.get()
                     out.append(record)
             out = [process(o) for o in out]
-            raise gen.Return(out)
+            return out
         else:
-            record = yield self.queues[name].get(timeout=timeout)
+            record = await self.queues[name].get(timeout=timeout)
             record = process(record)
-            raise gen.Return(record)
+            return record
 
     def qsize(self, stream=None, name=None, client=None):
         return self.queues[name].qsize()
@@ -156,23 +154,21 @@ class Queue(object):
         else:
             sync(self.client.loop, self.client.scheduler.queue_create,
                  name=self.name, maxsize=maxsize)
-            self._started = gen.moment
+            self._started = None
 
     def __await__(self):
-        @gen.coroutine
-        def _():
-            yield self._started
-            raise gen.Return(self)
+        async def _():
+            await self._started
+            return self
         return _().__await__()
 
-    @gen.coroutine
-    def _put(self, value, timeout=None):
+    async def _put(self, value, timeout=None):
         if isinstance(value, Future):
-            yield self.client.scheduler.queue_put(key=tokey(value.key),
+            await self.client.scheduler.queue_put(key=tokey(value.key),
                                                   timeout=timeout,
                                                   name=self.name)
         else:
-            yield self.client.scheduler.queue_put(data=value,
+            await self.client.scheduler.queue_put(data=value,
                                                   timeout=timeout,
                                                   name=self.name)
 
@@ -198,9 +194,8 @@ class Queue(object):
         """ Current number of elements in the queue """
         return self.client.sync(self._qsize)
 
-    @gen.coroutine
-    def _get(self, timeout=None, batch=False):
-        resp = yield self.client.scheduler.queue_get(timeout=timeout,
+    async def _get(self, timeout=None, batch=False):
+        resp = await self.client.scheduler.queue_get(timeout=timeout,
                                                      name=self.name,
                                                      batch=batch)
 
@@ -221,12 +216,10 @@ class Queue(object):
         else:
             result = list(map(process, resp))
 
-        raise gen.Return(result)
+        return result
 
-    @gen.coroutine
-    def _qsize(self):
-        result = yield self.client.scheduler.queue_qsize(name=self.name)
-        raise gen.Return(result)
+    async def _qsize(self):
+        return await self.client.scheduler.queue_qsize(name=self.name)
 
     def _release(self):
         if self.client.status == 'running':  # TODO: can leave zombie futures
@@ -237,7 +230,7 @@ class Queue(object):
         self._release()
 
     def __getstate__(self):
-        return (self.name, self.client.scheduler.address)
+        return self.name, self.client.scheduler.address
 
     def __setstate__(self, state):
         name, address = state

@@ -16,9 +16,10 @@ try:
 except ImportError:
     from toolz import frequencies, merge, pluck
 from toolz import memoize, valmap, first, second, concat
-from tornado import gen
-from tornado.gen import Return
-from tornado.ioloop import IOLoop
+import asyncio
+# from tornado import gen
+# from tornado.gen import Return
+# from tornado.ioloop import IOLoop
 
 from dask.core import reverse_dict
 from dask.order import order
@@ -461,11 +462,10 @@ class Scheduler(ServerNode):
 
         return self.finished()
 
-    @gen.coroutine
-    def finished(self):
+    async def finished(self):
         """ Wait until all coroutines have ceased """
         while any(not c.done() for c in self.coroutines):
-            yield All(self.coroutines)
+            await All(self.coroutines)
 
     def close_comms(self):
         """ Close all active Comms."""
@@ -473,8 +473,7 @@ class Scheduler(ServerNode):
             comm.abort()
         self.rpc.close()
 
-    @gen.coroutine
-    def close(self, comm=None, fast=False):
+    async def close(self, comm=None, fast=False):
         """ Send cleanup signal to all coroutines then wait until finished
 
         See Also
@@ -489,15 +488,14 @@ class Scheduler(ServerNode):
             with ignoring(AttributeError):
                 ext.teardown()
         logger.info("Scheduler closing all comms")
-        yield self.cleanup()
+        await self.cleanup()
         if not fast:
-            yield self.finished()
+            await self.finished()
         self.close_comms()
         self.status = 'closed'
         self.stop()
 
-    @gen.coroutine
-    def close_worker(self, stream=None, worker=None):
+    async def close_worker(self, stream=None, worker=None):
         """ Remove a worker from the cluster
 
         This both removes the worker from our local state and also sends a
@@ -514,17 +512,16 @@ class Scheduler(ServerNode):
 
             with rpc(address) as r:
                 try:
-                    yield r.terminate(report=False)
+                    await r.terminate(report=False)
                 except EnvironmentError as e:
                     logger.info("Exception from worker while closing: %s", e)
 
             self.remove_worker(address=worker)
 
-    @gen.coroutine
-    def cleanup(self):
+    async def cleanup(self):
         """ Clean up queues and coroutines, prepare to stop """
         if self.status == 'closing':
-            raise gen.Return()
+            return
 
         self.status = 'closing'
         logger.debug("Cleaning up coroutines")
@@ -535,7 +532,7 @@ class Scheduler(ServerNode):
                 futures.append(comm.close())
 
         for future in futures:
-            yield future
+            await future
 
     ###########
     # Stimuli #
@@ -1135,8 +1132,7 @@ class Scheduler(ServerNode):
                 if self.status == 'running':
                     logger.critical("Tried writing to closed comm: %s", msg)
 
-    @gen.coroutine
-    def add_client(self, comm, client=None):
+    async def add_client(self, comm, client=None):
         """ Add client to network
 
         We listen to all future messages from this Comm.
@@ -1145,11 +1141,11 @@ class Scheduler(ServerNode):
         self.log_event(['all', client], {'action': 'add-client',
                                          'client': client})
         try:
-            yield self.handle_client(comm, client=client)
+            await self.handle_client(comm, client=client)
         finally:
             if not comm.closed():
                 self.comms[client].send({'op': 'stream-closed'})
-            yield self.comms[client].close()
+            await self.comms[client].close()
             del self.comms[client]
             logger.info("Close client connection: %s", client)
 
@@ -1162,8 +1158,7 @@ class Scheduler(ServerNode):
         with ignoring(KeyError):
             del self.wants_what[client]
 
-    @gen.coroutine
-    def handle_client(self, comm, client=None):
+    async def handle_client(self, comm, client=None):
         """
         Listen and respond to messages from clients
 
@@ -1184,7 +1179,7 @@ class Scheduler(ServerNode):
 
             while True:
                 try:
-                    msgs = yield comm.read()
+                    msgs = await comm.read()
                 except (CommClosedError, AssertionError, GeneratorExit):
                     break
                 except Exception as e:
@@ -1220,7 +1215,7 @@ class Scheduler(ServerNode):
                                 msg['client'] = client
                             result = handler(**msg)
                             if isinstance(result, gen.Future):
-                                yield result
+                                await result
                         except Exception as e:
                             logger.exception(e)
                             raise
@@ -1333,8 +1328,7 @@ class Scheduler(ServerNode):
         self.occupancy[actual_worker] -= self.processing[actual_worker][key]
         self.processing[actual_worker][key] = 0
 
-    @gen.coroutine
-    def handle_worker(self, worker):
+    async def handle_worker(self, worker):
         """
         Listen to responses from a single worker
 
@@ -1345,13 +1339,13 @@ class Scheduler(ServerNode):
         Scheduler.handle_client: Equivalent coroutine for clients
         """
         try:
-            comm = yield connect(worker, connection_args=self.connection_args)
+            comm = await connect(worker, connection_args=self.connection_args)
         except Exception as e:
             logger.error("Failed to connect to worker %r: %s",
                          worker, e)
             self.remove_worker(address=worker)
             return
-        yield comm.write({'op': 'compute-stream', 'reply': False})
+        await comm.write({'op': 'compute-stream', 'reply': False})
         worker_comm = self.worker_comms[worker]
         worker_comm.start(comm)
         logger.info("Starting worker compute stream, %s", worker)
@@ -1359,7 +1353,7 @@ class Scheduler(ServerNode):
         io_error = None
         try:
             while True:
-                msgs = yield comm.read()
+                msgs = await comm.read()
                 start = time()
 
                 if not isinstance(msgs, list):
@@ -1440,8 +1434,7 @@ class Scheduler(ServerNode):
     # Less common interactions #
     ############################
 
-    @gen.coroutine
-    def scatter(self, comm=None, data=None, workers=None, client=None,
+    async def scatter(self, comm=None, data=None, workers=None, client=None,
                 broadcast=False, timeout=2):
         """ Send data out to workers
 
@@ -1451,9 +1444,9 @@ class Scheduler(ServerNode):
         """
         start = time()
         while not self.workers:
-            yield gen.sleep(0.2)
+            await asyncio.sleep(0.2)
             if time() > start + timeout:
-                raise gen.TimeoutError("No workers found")
+                raise asyncio.TimeoutError("No workers found")
 
         if workers is None:
             ncores = self.ncores
@@ -1463,7 +1456,7 @@ class Scheduler(ServerNode):
 
         assert isinstance(data, dict)
 
-        keys, who_has, nbytes = yield scatter_to_workers(ncores, data,
+        keys, who_has, nbytes = await scatter_to_workers(ncores, data,
                                                          rpc=self.rpc,
                                                          report=False)
 
@@ -1474,20 +1467,19 @@ class Scheduler(ServerNode):
                 n = len(ncores)
             else:
                 n = broadcast
-            yield self.replicate(keys=keys, workers=workers, n=n)
+            await self.replicate(keys=keys, workers=workers, n=n)
 
         self.log_event([client, 'all'], {'action': 'scatter',
                                          'client': client,
                                          'count': len(data)})
-        raise gen.Return(keys)
+        return keys
 
-    @gen.coroutine
-    def gather(self, comm=None, keys=None):
+    async def gather(self, comm=None, keys=None):
         """ Collect data in from workers """
         keys = list(keys)
         who_has = {key: self.who_has.get(key, ()) for key in keys}
 
-        data, missing_keys, missing_workers = yield gather_from_workers(
+        data, missing_keys, missing_workers = await gather_from_workers(
                 who_has, rpc=self.rpc, close=False)
         if not missing_keys:
             result = {'status': 'OK', 'data': data}
@@ -1512,10 +1504,9 @@ class Scheduler(ServerNode):
 
         self.log_event('all', {'action': 'gather',
                                'count': len(keys)})
-        raise gen.Return(result)
+        return result
 
-    @gen.coroutine
-    def restart(self, client=None, timeout=3):
+    async def restart(self, client=None, timeout=3):
         """ Restart all workers.  Reset local state. """
         with log_errors():
 
@@ -1557,9 +1548,9 @@ class Scheduler(ServerNode):
 
             try:
                 resps = All([nanny.restart(close=True) for nanny in nannies])
-                resps = yield gen.with_timeout(timedelta(seconds=timeout), resps)
+                resps = await asyncio.wait_for(resps, timeout)
                 assert all(resp == 'OK' for resp in resps)
-            except gen.TimeoutError:
+            except asyncio.TimeoutError:
                 logger.info("Nannies didn't report back restarted within timeout")
             finally:
                 for nanny in nannies:
@@ -1575,9 +1566,8 @@ class Scheduler(ServerNode):
 
             self.report({'op': 'restart'})
 
-    @gen.coroutine
-    def broadcast(self, comm=None, msg=None, workers=None, hosts=None,
-            nanny=False):
+    async def broadcast(self, comm=None, msg=None, workers=None, hosts=None,
+                        nanny=False):
         """ Broadcast message to workers, return all results """
         if workers is None:
             if hosts is None:
@@ -1596,21 +1586,18 @@ class Scheduler(ServerNode):
         else:
             addresses = workers
 
-        @gen.coroutine
-        def send_message(addr):
-            comm = yield connect(addr, deserialize=self.deserialize,
+        async def send_message(addr):
+            comm = await connect(addr, deserialize=self.deserialize,
                                  connection_args=self.connection_args)
-            resp = yield send_recv(comm, close=True, **msg)
-            raise gen.Return(resp)
+            return await send_recv(comm, close=True, **msg)
 
-        results = yield All([send_message(self.coerce_address(address))
+        results = await All([send_message(self.coerce_address(address))
                              for address in addresses
                              if address is not None])
 
-        raise Return(dict(zip(workers, results)))
+        return dict(zip(workers, results))
 
-    @gen.coroutine
-    def rebalance(self, comm=None, keys=None, workers=None):
+    async def rebalance(self, comm=None, keys=None, workers=None):
         """ Rebalance keys so that each worker stores roughly equal bytes
 
         **Policy**
@@ -1626,8 +1613,8 @@ class Scheduler(ServerNode):
             workers = set(workers or self.workers)
 
             if not keys.issubset(self.who_has):
-                raise Return({'status': 'missing-data',
-                              'keys': list(keys - set(self.who_has))})
+                return {'status': 'missing-data',
+                        'keys': list(keys - set(self.who_has))}
 
             workers_by_key = {k: self.who_has.get(k, set()) & workers for k in keys}
             keys_by_worker = {w: set() for w in workers}
@@ -1654,8 +1641,7 @@ class Scheduler(ServerNode):
 
                 try:
                     while worker_bytes[sender] > avg:
-                        while (worker_bytes[recipient] < avg and
-                               worker_bytes[sender] > avg):
+                        while worker_bytes[recipient] < avg < worker_bytes[sender]:
                             k, nb = next(sender_keys)
                             if k not in keys_by_worker[recipient]:
                                 keys_by_worker[recipient].add(k)
@@ -1674,8 +1660,8 @@ class Scheduler(ServerNode):
                 to_recipients[recipient][key].append(sender)
                 to_senders[sender].append(key)
 
-            result = yield {r: self.rpc(addr=r).gather(who_has=v)
-                            for r, v in to_recipients.items()}
+            result = {r: await self.rpc(addr=r).gather(who_has=v)
+                      for r, v in to_recipients.items()}
             for r, v in to_recipients.items():
                 self.log_event(r, {'action': 'rebalance',
                                    'who_has': v})
@@ -1687,9 +1673,9 @@ class Scheduler(ServerNode):
                                    'moved_keys': len(msgs)})
 
             if not all(r['status'] == 'OK' for r in result.values()):
-                raise Return({'status': 'missing-data',
-                              'keys': sum([r['keys'] for r in result
-                                                     if 'keys' in r], [])})
+                return {'status': 'missing-data',
+                        'keys': sum([r['keys'] for r in result
+                                               if 'keys' in r], [])}
 
             for sender, recipient, key in msgs:
                 self.who_has[key].add(recipient)
@@ -1701,8 +1687,8 @@ class Scheduler(ServerNode):
                                             recipient))
             self._transition_counter += 1
 
-            result = yield {r: self.rpc(addr=r).delete_data(keys=v, report=False)
-                            for r, v in to_senders.items()}
+            result = {r: await self.rpc(addr=r).delete_data(keys=v, report=False)
+                         for r, v in to_senders.items()}
 
             for sender, recipient, key in msgs:
                 self.who_has[key].remove(sender)
@@ -1710,10 +1696,9 @@ class Scheduler(ServerNode):
                 self.worker_bytes[sender] -= self.nbytes.get(key,
                                                              DEFAULT_DATA_SIZE)
 
-            raise Return({'status': 'OK'})
+            return {'status': 'OK'}
 
-    @gen.coroutine
-    def replicate(self, comm=None, keys=None, n=None, workers=None,
+    async def replicate(self, comm=None, keys=None, n=None, workers=None,
             branching_factor=2, delete=True):
         """ Replicate data throughout cluster
 
@@ -1743,8 +1728,8 @@ class Scheduler(ServerNode):
             raise ValueError("Can not use replicate to delete data")
 
         if not keys.issubset(self.who_has):
-            raise Return({'status': 'missing-data',
-                          'keys': list(keys - set(self.who_has))})
+            return {'status': 'missing-data',
+                    'keys': list(keys - set(self.who_has))}
 
         # Delete extraneous data
         if delete:
@@ -1753,7 +1738,7 @@ class Scheduler(ServerNode):
                         for k in keys
                         if len(self.who_has[k] & workers) > n}
             del_workers = {k: v for k, v in reverse_dict(del_keys).items() if v}
-            yield [self.rpc(addr=worker).delete_data(keys=list(keys),
+            [await self.rpc(addr=worker).delete_data(keys=list(keys),
                                                      report=False)
                    for worker, keys in del_workers.items()]
 
@@ -1781,8 +1766,8 @@ class Scheduler(ServerNode):
                     for w in sample:
                         gathers[w][k] = list(self.who_has[k])
 
-            results = yield {w: self.rpc(addr=w).gather(who_has=who_has)
-                                for w, who_has in gathers.items()}
+            results = {w: await self.rpc(addr=w).gather(who_has=who_has)
+                       for w, who_has in gathers.items()}
             for w, v in results.items():
                 if v['status'] == 'OK':
                     self.add_keys(worker=w, keys=list(gathers[w]))
@@ -1845,9 +1830,8 @@ class Scheduler(ServerNode):
 
             return to_close
 
-    @gen.coroutine
-    def retire_workers(self, comm=None, workers=None, remove=True, close=False,
-                       close_workers=False):
+    async def retire_workers(self, comm=None, workers=None, remove=True, close=False,
+                             close_workers=False):
         if close:
             logger.warning("The keyword close= has been deprecated. "
                            "Use close_workers= instead")
@@ -1858,9 +1842,9 @@ class Scheduler(ServerNode):
                     try:
                         workers = self.workers_to_close()
                         if workers:
-                            yield self.retire_workers(workers=workers,
+                            await self.retire_workers(workers=workers,
                                     remove=remove, close_workers=close_workers)
-                        raise gen.Return(list(workers))
+                        return list(workers)
                     except KeyError:  # keys left during replicate
                         pass
 
@@ -1874,13 +1858,13 @@ class Scheduler(ServerNode):
             other_workers = set(self.worker_info) - workers
             if keys:
                 if other_workers:
-                    yield self.replicate(keys=keys, workers=other_workers, n=1,
+                    await self.replicate(keys=keys, workers=other_workers, n=1,
                                          delete=False)
                 else:
-                    raise gen.Return([])
+                    return []
 
             if close_workers and workers:
-                yield [self.close_worker(worker=w) for w in workers]
+                [await self.close_worker(worker=w) for w in workers]
             if remove:
                 for w in workers:
                     self.remove_worker(address=w, safe=True)
@@ -1890,7 +1874,7 @@ class Scheduler(ServerNode):
                                    'moved-keys': len(keys)})
             self.log_event(list(workers), {'action': 'retired'})
 
-            raise gen.Return(list(workers))
+            return list(workers)
 
     def add_keys(self, comm=None, worker=None, keys=()):
         """
@@ -1967,8 +1951,7 @@ class Scheduler(ServerNode):
                          'traceback': self.tracebacks.get(failing_key, None)},
                          client=client)
 
-    @gen.coroutine
-    def feed(self, comm, function=None, setup=None, teardown=None, interval=1, **kwargs):
+    async def feed(self, comm, function=None, setup=None, teardown=None, interval=1, **kwargs):
         """
         Provides a data Comm to external requester
 
@@ -1992,8 +1975,8 @@ class Scheduler(ServerNode):
                         response = function(self)
                     else:
                         response = function(self, state)
-                    yield comm.write(response)
-                    yield gen.sleep(interval)
+                    await comm.write(response)
+                    await asyncio.sleep(interval)
             except (EnvironmentError, CommClosedError):
                 if teardown:
                     teardown(self, state)
@@ -3139,8 +3122,7 @@ class Scheduler(ServerNode):
     # Cleanup #
     ###########
 
-    @gen.coroutine
-    def reevaluate_occupancy(self):
+    async def reevaluate_occupancy(self):
         """ Periodically reassess task duration time
 
         The expected duration of a task can change over time.  Unfortunately we
@@ -3159,17 +3141,16 @@ class Scheduler(ServerNode):
         with log_errors():
             import psutil
             proc = psutil.Process()
-            last = time()
 
             while self.status != 'closed':
-                yield gen.sleep(DELAY)
+                await asyncio.sleep(DELAY)
                 while not self.rprocessing:
-                    yield gen.sleep(DELAY)
+                    await asyncio.sleep(DELAY)
                 last = time()
 
                 for w, processing in list(self.processing.items()):
                     while proc.cpu_percent() > 50:
-                        yield gen.sleep(DELAY)
+                        await asyncio.sleep(DELAY)
                         last = time()
 
                     if w not in self.workers or not processing:
@@ -3179,7 +3160,7 @@ class Scheduler(ServerNode):
 
                     duration = time() - last
                     if duration > 0.005:  # 5ms since last release
-                        yield gen.sleep(duration * 5)  # 25ms gap
+                        await asyncio.sleep(duration * 5)  # 25ms gap
                         last = time()
 
     def _reevaluate_occupancy_worker(self, worker):

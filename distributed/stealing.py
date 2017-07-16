@@ -6,12 +6,11 @@ from math import log
 import os
 from time import time
 
-from tornado.ioloop import PeriodicCallback
-
 from .config import config
 from .core import CommClosedError
 from .diagnostics.plugin import SchedulerPlugin
 from .utils import key_split, log_errors
+from .tornado_shim import PeriodicCallback
 
 try:
     from cytoolz import topk

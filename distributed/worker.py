@@ -1,5 +1,6 @@
 from __future__ import print_function, division, absolute_import
 
+import asyncio
 from collections import defaultdict, deque
 from datetime import timedelta
 import heapq
@@ -19,10 +20,10 @@ try:
     from cytoolz import pluck
 except ImportError:
     from toolz import pluck
-from tornado.gen import Return
-from tornado import gen
-from tornado.ioloop import IOLoop, PeriodicCallback
-from tornado.locks import Event
+# from tornado.gen import Return
+# from tornado import gen
+# from tornado.ioloop import IOLoop, PeriodicCallback
+# from tornado.locks import Event
 
 from .batched import BatchedSend
 from .comm import get_address_host, get_local_address_for
@@ -171,8 +172,7 @@ class WorkerBase(ServerNode):
         """ For API compatibility with Nanny """
         return self.address
 
-    @gen.coroutine
-    def heartbeat(self):
+    async def heartbeat(self):
         if not self.heartbeat_active:
             self.heartbeat_active = True
             logger.debug("Heartbeat: %s" % self.address)
@@ -185,7 +185,7 @@ class WorkerBase(ServerNode):
                 else:
                     kwargs = {}
 
-                yield self.scheduler.register(
+                await self.scheduler.register(
                         address=self.address,
                         name=self.name,
                         ncores=self.ncores,
@@ -203,16 +203,15 @@ class WorkerBase(ServerNode):
         else:
             logger.debug("Heartbeat skipped: channel busy")
 
-    @gen.coroutine
-    def _register_with_scheduler(self):
+    async def _register_with_scheduler(self):
         self.heartbeat_callback.stop()
         start = time()
         while True:
             if self.death_timeout and time() > start + self.death_timeout:
-                yield self._close(timeout=1)
+                await self._close(timeout=1)
                 return
             if self.status in ('closed', 'closing'):
-                raise gen.Return
+                return
             try:
                 future = self.scheduler.register(
                         ncores=self.ncores, address=self.address,
@@ -228,16 +227,17 @@ class WorkerBase(ServerNode):
                         pid=os.getpid())
                 if self.death_timeout:
                     diff = self.death_timeout - (time() - start)
+                    # FIXME
                     future = gen.with_timeout(timedelta(seconds=diff), future,
                                               io_loop=self.loop)
-                resp = yield future
+                resp = await future
                 self.status = 'running'
                 break
             except EnvironmentError:
                 logger.info("Trying to connect to scheduler: %s" %
                             str(self.scheduler.address))
-                yield gen.sleep(0.1)
-            except gen.TimeoutError:
+                await asyncio.sleep(0.1)
+            except asyncio.TimeoutError:
                 pass
         if resp != 'OK':
             raise ValueError("Unexpected response from register: %r" % (resp,))
@@ -259,8 +259,7 @@ class WorkerBase(ServerNode):
             self.services[k].listen((listen_ip, port))
             self.service_ports[k] = self.services[k].port
 
-    @gen.coroutine
-    def _start(self, addr_or_port=0):
+    async def _start(self, addr_or_port=0):
         assert self.status is None
 
         # XXX Factor this out
@@ -299,7 +298,7 @@ class WorkerBase(ServerNode):
         logger.info('      Local Directory: %26s', self.local_dir)
         logger.info('-' * 49)
 
-        yield self._register_with_scheduler()
+        await self._register_with_scheduler()
 
         if self.status == 'running':
             logger.info('        Registered to: %32s', self.scheduler.address)
@@ -315,19 +314,19 @@ class WorkerBase(ServerNode):
                 'ncores': self.ncores,
                 'memory_limit': self.memory_limit}
 
-    @gen.coroutine
-    def _close(self, report=True, timeout=10, nanny=True):
+    async def _close(self, report=True, timeout=10, nanny=True):
         if self.status in ('closed', 'closing'):
             return
         logger.info("Stopping worker at %s", self.address)
         if self._client:
-            yield self._client._close()
+            await self._client._close()
         self.status = 'closing'
         self.stop()
         self.heartbeat_callback.stop()
-        with ignoring(EnvironmentError, gen.TimeoutError):
+        with ignoring(EnvironmentError, asyncio.TimeoutError):
             if report:
-                yield gen.with_timeout(timedelta(seconds=timeout),
+                # FIXME
+                await gen.with_timeout(timedelta(seconds=timeout),
                         self.scheduler.unregister(address=self.address),
                         io_loop=self.loop)
         self.scheduler.close_rpc()
@@ -342,7 +341,7 @@ class WorkerBase(ServerNode):
 
         if nanny and 'nanny' in self.service_ports:
             with self.rpc((self.ip, self.service_ports['nanny'])) as r:
-                yield r.terminate()
+                await r.terminate()
 
         self.rpc.close()
         self._closed.set()
@@ -358,18 +357,15 @@ class WorkerBase(ServerNode):
             if ref() is None:
                 _global_workers.remove(ref)
 
-    @gen.coroutine
-    def terminate(self, comm, report=True):
-        yield self._close(report=report)
-        raise Return('OK')
+    async def terminate(self, comm, report=True):
+        await self._close(report=report)
+        return 'OK'
 
-    @gen.coroutine
-    def wait_until_closed(self):
-        yield self._closed.wait()
+    async def wait_until_closed(self):
+        await self._closed.wait()
         assert self.status == 'closed'
 
-    @gen.coroutine
-    def executor_submit(self, key, function, *args, **kwargs):
+    async def executor_submit(self, key, function, *args, **kwargs):
         """ Safely run function in thread pool executor
 
         We've run into issues running concurrent.future futures within
@@ -383,14 +379,12 @@ class WorkerBase(ServerNode):
         pc = PeriodicCallback(lambda: logger.debug("future state: %s - %s",
             key, future._state), 1000, io_loop=self.loop); pc.start()
         try:
-            yield future
+            result = await future.result()
         finally:
             pc.stop()
 
-        result = future.result()
-
         # logger.info("Finish job %d, %s", i, key)
-        raise gen.Return(result)
+        return result
 
     def run(self, comm, function, args=(), kwargs={}):
         return run(self, comm, function=function, args=args, kwargs=kwargs)
@@ -423,8 +417,7 @@ class WorkerBase(ServerNode):
                 'status': 'OK'}
         return info
 
-    @gen.coroutine
-    def delete_data(self, comm=None, keys=None, report=True):
+    async def delete_data(self, comm=None, keys=None, report=True):
         if keys:
             for key in list(keys):
                 self.log.append((key, 'delete'))
@@ -438,12 +431,11 @@ class WorkerBase(ServerNode):
             if report:
                 logger.debug("Reporting loss of keys to scheduler")
                 # TODO: this route seems to not exist?
-                yield self.scheduler.remove_keys(address=self.address,
+                await self.scheduler.remove_keys(address=self.address,
                                                  keys=list(keys))
-        raise Return('OK')
+        return 'OK'
 
-    @gen.coroutine
-    def get_data(self, comm, keys=None, who=None):
+    async def get_data(self, comm, keys=None, who=None):
         start = time()
 
         msg = {k: to_serialize(self.data[k]) for k in keys if k in self.data}
@@ -453,7 +445,7 @@ class WorkerBase(ServerNode):
             self.digests['get-data-load-duration'].add(stop - start)
         start = time()
         try:
-            compressed = yield comm.write(msg)
+            compressed = await comm.write(msg)
         except EnvironmentError:
             logger.exception('failed during get data', exc_info=True)
             comm.abort()
@@ -478,10 +470,9 @@ class WorkerBase(ServerNode):
             'bandwidth': total_bytes / duration
         })
 
-        raise gen.Return('dont-reply')
+        return 'dont-reply'
 
-    @gen.coroutine
-    def set_resources(self, **resources):
+    async def set_resources(self, **resources):
         for r, quantity in resources.items():
             if r in self.total_resources:
                 self.available_resources[r] += quantity - self.total_resources[r]
@@ -489,7 +480,7 @@ class WorkerBase(ServerNode):
                 self.available_resources[r] = quantity
             self.total_resources[r] = quantity
 
-        yield self.scheduler.set_resources(resources=self.total_resources,
+        await self.scheduler.set_resources(resources=self.total_resources,
                                            worker=self.address)
 
     def start_ipython(self, comm):
@@ -562,21 +553,20 @@ class WorkerBase(ServerNode):
     def keys(self, comm=None):
         return list(self.data)
 
-    @gen.coroutine
-    def gather(self, comm=None, who_has=None):
+    async def gather(self, comm=None, who_has=None):
         who_has = {k: [coerce_to_address(addr) for addr in v]
                     for k, v in who_has.items()
                     if k not in self.data}
-        result, missing_keys, missing_workers = yield gather_from_workers(
+        result, missing_keys, missing_workers = await gather_from_workers(
                 who_has, rpc=self.rpc)
         if missing_keys:
             logger.warning("Could not find data: %s on workers: %s (who_has: %s)",
                            missing_keys, missing_workers, who_has)
-            raise Return({'status': 'missing-data',
-                          'keys': missing_keys})
+            return {'status': 'missing-data',
+                    'keys': missing_keys}
         else:
             self.update_data(data=result, report=False)
-            raise Return({'status': 'OK'})
+            return {'status': 'OK'}
 
 
 job_counter = [0]
@@ -755,8 +745,7 @@ def weight(k, v):
     return sizeof(v)
 
 
-@gen.coroutine
-def run(server, comm, function, args=(), kwargs={}, is_coro=False, wait=True):
+async def run(server, comm, function, args=(), kwargs={}, is_coro=False, wait=True):
     assert wait or is_coro, "Combination not supported"
     function = pickle.loads(function)
     if args:
@@ -771,7 +760,7 @@ def run(server, comm, function, args=(), kwargs={}, is_coro=False, wait=True):
     try:
         result = function(*args, **kwargs)
         if is_coro:
-            result = (yield result) if wait else None
+            result = (await result) if wait else None
     except Exception as e:
         logger.warning(" Run Failed\n"
             "Function: %s\n"
@@ -787,7 +776,7 @@ def run(server, comm, function, args=(), kwargs={}, is_coro=False, wait=True):
             'status': 'OK',
             'result': to_serialize(result),
         }
-    raise Return(response)
+    return response
 
 
 class Worker(WorkerBase):
@@ -1042,8 +1031,7 @@ class Worker(WorkerBase):
     # Update Graph #
     ################
 
-    @gen.coroutine
-    def compute_stream(self, comm):
+    async def compute_stream(self, comm):
         try:
             self.batched_stream = BatchedSend(interval=2, loop=self.loop)
             self.batched_stream.start(comm)
@@ -1059,7 +1047,7 @@ class Worker(WorkerBase):
 
             while not closed:
                 try:
-                    msgs = yield comm.read()
+                    msgs = await comm.read()
                 except CommClosedError:
                     on_closed()
                     break
@@ -1096,7 +1084,7 @@ class Worker(WorkerBase):
                 if self.digests is not None:
                     self.digests['handle-messages-duration'].add(end - start)
 
-            yield self.batched_stream.close()
+            await self.batched_stream.close()
             logger.info('Close compute stream')
         except Exception as e:
             logger.exception(e)
@@ -1600,8 +1588,7 @@ class Worker(WorkerBase):
 
         return deps, total_bytes
 
-    @gen.coroutine
-    def gather_dep(self, worker, dep, deps, total_nbytes, cause=None):
+    async def gather_dep(self, worker, dep, deps, total_nbytes, cause=None):
         if self.status != 'running':
             return
         with log_errors():
@@ -1684,8 +1671,7 @@ class Worker(WorkerBase):
             self.transition(key, 'error')
         self.release_dep(dep)
 
-    @gen.coroutine
-    def handle_missing_dep(self, *deps, **kwargs):
+    async def handle_missing_dep(self, *deps, **kwargs):
         original_deps = list(deps)
         self.log.append(('handle-missing', deps))
         try:
@@ -1705,7 +1691,7 @@ class Worker(WorkerBase):
                 logger.info("Dependent not found: %s %s .  Asking scheduler",
                             dep, self.suspicious_deps[dep])
 
-            who_has = yield self.scheduler.who_has(keys=list(deps))
+            who_has = await self.scheduler.who_has(keys=list(deps))
             who_has = {k: v for k, v in who_has.items() if v}
             self.update_who_has(who_has)
             for dep in deps:
@@ -1735,12 +1721,11 @@ class Worker(WorkerBase):
 
             self.ensure_communicating()
 
-    @gen.coroutine
-    def query_who_has(self, *deps):
+    async def query_who_has(self, *deps):
         with log_errors():
-            response = yield self.scheduler.who_has(keys=deps)
+            response = await self.scheduler.who_has(keys=deps)
             self.update_who_has(response)
-            raise gen.Return(response)
+            return response
 
     def update_who_has(self, who_has):
         try:
@@ -1916,8 +1901,7 @@ class Worker(WorkerBase):
                 import pdb; pdb.set_trace()
             raise
 
-    @gen.coroutine
-    def execute(self, key, report=False):
+    async def execute(self, key, report=False):
         executor_error = None
         try:
             if key not in self.executing or key not in self.task_state:
@@ -1939,7 +1923,7 @@ class Worker(WorkerBase):
 
             logger.debug("Execute key: %s worker: %s", key, self.address)  # TODO: comment out?
             try:
-                result = yield self.executor_submit(key, apply_function, function,
+                result = await self.executor_submit(key, apply_function, function,
                                                     args2, kwargs2,
                                                     self.execution_state, key)
             except RuntimeError as e:

@@ -1,5 +1,6 @@
 from __future__ import print_function, division, absolute_import
 
+import asyncio
 import atexit
 from collections import Iterable
 from contextlib import contextmanager
@@ -31,7 +32,7 @@ except ImportError:
 
 from dask import istask
 from toolz import memoize, valmap
-from tornado import gen
+# from tornado import gen
 
 from .compatibility import Queue, PY3, PY2, get_thread_identity, unicode
 from .config import config
@@ -157,8 +158,7 @@ def ignoring(*exceptions):
         pass
 
 
-@gen.coroutine
-def ignore_exceptions(coroutines, *exceptions):
+async def ignore_exceptions(coroutines, *exceptions):
     """ Process list of coroutines, ignoring certain exceptions
 
     >>> coroutines = [cor(...) for ...]  # doctest: +SKIP
@@ -168,13 +168,12 @@ def ignore_exceptions(coroutines, *exceptions):
     results = []
     while not wait_iterator.done():
         with ignoring(*exceptions):
-            result = yield wait_iterator.next()
+            result = await wait_iterator.next()
             results.append(result)
-    raise gen.Return(results)
+    return results
 
 
-@gen.coroutine
-def All(*args):
+async def All(*args):
     """ Wait on many tasks at the same time
 
     Err once any of the tasks err.
@@ -182,13 +181,8 @@ def All(*args):
     See https://github.com/tornadoweb/tornado/issues/1546
     """
     if len(args) == 1 and isinstance(args[0], Iterable):
-        args = args[0]
-    tasks = gen.WaitIterator(*args)
-    results = [None for _ in args]
-    while not tasks.done():
-        result = yield tasks.next()
-        results[tasks.current_index] = result
-    raise gen.Return(results)
+        args = [a for a in args[0]]
+    return asyncio.gather(*args, return_exceptions=True)
 
 
 def sync(loop, func, *args, **kwargs):

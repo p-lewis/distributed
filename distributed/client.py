@@ -1,5 +1,6 @@
 from __future__ import print_function, division, absolute_import
 
+import asyncio
 import atexit
 from collections import defaultdict, Iterator, Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -28,11 +29,11 @@ from dask.core import flatten, get_dependencies
 from dask.compatibility import apply, unicode
 from dask.context import _globals
 from toolz import first, groupby, merge, valmap, keymap
-from tornado import gen
-from tornado.gen import TimeoutError
-from tornado.locks import Event, Condition
-from tornado.ioloop import IOLoop, PeriodicCallback
-from tornado.queues import Queue
+# from tornado import gen
+# from tornado.gen import TimeoutError
+# from tornado.locks import Event, Condition
+# from tornado.ioloop import IOLoop, PeriodicCallback
+# from tornado.queues import Queue
 
 from .batched import BatchedSend
 from .utils_comm import (WrappedKey, unpack_remotedata, pack_data,
@@ -158,33 +159,31 @@ class Future(WrappedKey):
         else:
             return result
 
-    @gen.coroutine
-    def _result(self, raiseit=True):
-        yield self._state.event.wait()
+    async def _result(self, raiseit=True):
+        await self._state.event.wait()
         if self.status == 'error':
             exc = clean_exception(self._state.exception,
                                   self._state.traceback)
             if raiseit:
                 six.reraise(*exc)
             else:
-                raise gen.Return(exc)
+                return exc
         elif self.status == 'cancelled':
             exception = CancelledError(self.key)
             if raiseit:
                 raise exception
             else:
-                raise gen.Return(exception)
+                return exception
         else:
-            result = yield self.client._gather([self])
-            raise gen.Return(result[0])
+            result = await self.client._gather([self])
+            return result[0]
 
-    @gen.coroutine
-    def _exception(self):
-        yield self.event.wait()
+    async def _exception(self):
+        await self.event.wait()
         if self.status == 'error':
-            raise gen.Return(self._state.exception)
+            return self._state.exception
         else:
-            raise gen.Return(None)
+            return None
 
     def exception(self, timeout=None):
         """ Return the exception of a failed task
@@ -229,13 +228,12 @@ class Future(WrappedKey):
         """ Returns True if the future has been cancelled """
         return self._state.status == 'cancelled'
 
-    @gen.coroutine
-    def _traceback(self):
-        yield self.event.wait()
+    async def _traceback(self):
+        await self.event.wait()
         if self.status == 'error':
-            raise gen.Return(self._state.traceback)
+            return self._state.traceback
         else:
-            raise gen.Return(None)
+            return None
 
     def traceback(self, timeout=None):
         """ Return the traceback of a failed task
@@ -354,11 +352,10 @@ class FutureState(object):
     __repr__ = __str__
 
 
-@gen.coroutine
-def done_callback(future, callback):
+async def done_callback(future, callback):
     """ Coroutine that waits on future, then calls callback """
     while future.status == 'pending':
-        yield future.event.wait()
+        await future.event.wait()
     callback(future)
 
 
@@ -627,13 +624,12 @@ class Client(Node):
         else:
             raise Exception("Client not running.  Status: %s" % self.status)
 
-    @gen.coroutine
-    def _start(self, timeout=5, **kwargs):
+    async def _start(self, timeout=5, **kwargs):
         address = self._start_arg
         if self.cluster is not None:
             # Ensure the cluster is started (no-op if already running)
             try:
-                yield self.cluster._start()
+                await self.cluster._start()
             except AttributeError:  # Some clusters don't have this method
                 pass
             except Exception:
@@ -642,7 +638,7 @@ class Client(Node):
             address = self.cluster.scheduler_address
         elif self.scheduler_file is not None:
             while not os.path.exists(self.scheduler_file):
-                yield gen.sleep(0.01)
+                await asyncio.sleep(0.01)
             for i in range(10):
                 try:
                     with open(self.scheduler_file) as f:
@@ -650,26 +646,26 @@ class Client(Node):
                     address = cfg['address']
                     break
                 except (ValueError, KeyError):  # JSON file not yet flushed
-                    yield gen.sleep(0.01)
+                    await asyncio.sleep(0.01)
         elif self._start_arg is None:
             from .deploy import LocalCluster
 
             try:
                 self.cluster = LocalCluster(loop=self.loop, start=False,
                                             **self._startup_kwargs)
-                yield self.cluster._start()
+                await self.cluster._start()
             except (OSError, socket.error) as e:
                 if e.errno != errno.EADDRINUSE:
                     raise
                 # The default port was taken, use a random one
                 self.cluster = LocalCluster(scheduler_port=0, loop=self.loop,
                                             start=False, **self._startup_kwargs)
-                yield self.cluster._start()
+                await self.cluster._start()
 
             # Wait for all workers to be ready
             while (not self.cluster.workers or
                    len(self.cluster.scheduler.ncores) < len(self.cluster.workers)):
-                yield gen.sleep(0.01)
+                await asyncio.sleep(0.01)
 
             address = self.cluster.scheduler_address
 
@@ -677,14 +673,13 @@ class Client(Node):
                              connection_args=self.connection_args)
         self.scheduler_comm = None
 
-        yield self._ensure_connected(timeout=timeout)
+        await self._ensure_connected(timeout=timeout)
 
         self.coroutines.append(self._handle_report())
 
-        raise gen.Return(self)
+        return self
 
-    @gen.coroutine
-    def _reconnect(self, timeout=0.1):
+    async def _reconnect(self, timeout=0.1):
         with log_errors():
             assert self.scheduler_comm.comm.closed()
             self.status = 'connecting'
@@ -696,13 +691,12 @@ class Client(Node):
 
             while self.status == 'connecting':
                 try:
-                    yield self._ensure_connected()
+                    await self._ensure_connected()
                     break
                 except EnvironmentError:
-                    yield gen.sleep(timeout)
+                    await asyncio.sleep(timeout)
 
-    @gen.coroutine
-    def _ensure_connected(self, timeout=None):
+    async def _ensure_connected(self, timeout=None):
         if (self.scheduler_comm and not self.scheduler_comm.closed() or
             self._connecting_to_scheduler):
             return
@@ -710,17 +704,17 @@ class Client(Node):
         self._connecting_to_scheduler = True
 
         try:
-            comm = yield connect(self.scheduler.address, timeout=timeout,
+            comm = await connect(self.scheduler.address, timeout=timeout,
                                  connection_args=self.connection_args)
 
-            yield self.scheduler.identity()
+            await self.scheduler.identity()
 
-            yield comm.write({'op': 'register-client',
+            await comm.write({'op': 'register-client',
                               'client': self.id,
                               'reply': False})
         finally:
             self._connecting_to_scheduler = False
-        msg = yield comm.read()
+        msg = await comm.read()
         assert len(msg) == 1
         assert msg[0]['op'] == 'stream-start'
 
@@ -742,14 +736,12 @@ class Client(Node):
             self.start()
         return self
 
-    @gen.coroutine
-    def __aenter__(self):
-        yield self._started
-        raise gen.Return(self)
+    async def __aenter__(self):
+        await self._started
+        return self
 
-    @gen.coroutine
-    def __aexit__(self, typ, value, traceback):
-        yield self._shutdown()
+    async def __aexit__(self, typ, value, traceback):
+        await self._shutdown()
 
     def __exit__(self, type, value, traceback):
         self.shutdown()
@@ -779,19 +771,18 @@ class Client(Node):
                                      'keys': [key],
                                      'client': self.id})
 
-    @gen.coroutine
-    def _handle_report(self):
+    async def _handle_report(self):
         """ Listen to scheduler """
         with log_errors():
             while True:
                 try:
-                    msgs = yield self.scheduler_comm.comm.read()
+                    msgs = await self.scheduler_comm.comm.read()
                 except CommClosedError:
                     if self.status == 'running':
                         logger.warning("Client report stream closed to scheduler")
                         logger.info("Reconnecting...")
                         self.status = 'connecting'
-                        yield self._reconnect()
+                        await self._reconnect()
                         continue
                     else:
                         break
@@ -868,15 +859,14 @@ class Client(Node):
         logger.warning("Scheduler exception:")
         logger.exception(exception)
 
-    @gen.coroutine
-    def _close(self):
+    async def _close(self):
         with log_errors():
             if self.status == 'closed':
-                raise gen.Return()
+                return
             if self.status == 'running':
                 self._send_to_scheduler({'op': 'close-stream'})
             with ignoring(AttributeError):
-                yield self.scheduler_comm.close()
+                await self.scheduler_comm.close()
             with ignoring(AttributeError):
                 self.scheduler.close_rpc()
             self.status = 'closed'
@@ -885,26 +875,25 @@ class Client(Node):
         """ Close this client and its connection to the scheduler """
         return self.sync(self._close)
 
-    @gen.coroutine
-    def _shutdown(self, fast=False):
+    async def _shutdown(self, fast=False):
         """ Send shutdown signal and wait until scheduler completes """
         with log_errors():
             if self.status == 'closed':
-                raise gen.Return()
+                return
             if self.status == 'running':
                 self._send_to_scheduler({'op': 'close-stream'})
             if self._start_arg is None:
                 with ignoring(AttributeError):
-                    yield self.cluster._close()
+                    await self.cluster._close()
             self.status = 'closed'
             if _get_global_client() is self:
                 _set_global_client(None)
             if not fast:
-                with ignoring(TimeoutError):
-                    yield [gen.with_timeout(timedelta(seconds=2), f)
-                            for f in self.coroutines]
+                with ignoring(asyncio.TimeoutError):
+                    for f in self.coroutines:
+                        await asyncio.wait_for(f, 2)
             with ignoring(AttributeError):
-                yield self.scheduler_comm.close()
+                await self.scheduler_comm.close()
             with ignoring(AttributeError):
                 self.scheduler.close_rpc()
             self.scheduler = None
@@ -1183,8 +1172,7 @@ class Client(Node):
 
         return [futures[tokey(k)] for k in keys]
 
-    @gen.coroutine
-    def _gather(self, futures, errors='raise', direct=None, local_worker=None):
+    async def _gather(self, futures, errors='raise', direct=None, local_worker=None):
         futures2, keys = unpack_remotedata(futures, byte_keys=True)
         keys = [tokey(key) for key in keys]
         bad_data = dict()
@@ -1198,11 +1186,10 @@ class Client(Node):
                 if w.scheduler.address == self.scheduler.address:
                     direct = True
 
-        @gen.coroutine
-        def wait(k):
+        async def wait(k):
             """ Want to stop the All(...) early if we find an error """
             st = self.futures[k]
-            yield st.event.wait()
+            await st.event.wait()
             if st.status != 'finished':
                 raise AllExit()
 
@@ -1210,7 +1197,7 @@ class Client(Node):
             logger.debug("Waiting on futures to clear before gather")
 
             with ignoring(AllExit):
-                yield All([wait(key) for key in keys if key in self.futures])
+                await All([wait(key) for key in keys if key in self.futures])
 
             failed = ('error', 'cancelled')
 
@@ -1250,18 +1237,18 @@ class Client(Node):
                 keys = [k for k in keys if k not in data]
 
             if direct or local_worker:  # gather directly from workers
-                who_has = yield self.scheduler.who_has(keys=keys)
-                data2, missing_keys, missing_workers = yield gather_from_workers(
+                who_has = await self.scheduler.who_has(keys=keys)
+                data2, missing_keys, missing_workers = await gather_from_workers(
                     who_has, rpc=self.rpc, close=False)
                 response = {'status': 'OK', 'data': data2}
                 if missing_keys:
                     keys2 = [key for key in keys if key not in data2]
-                    response = yield self.scheduler.gather(keys=keys2)
+                    response = await self.scheduler.gather(keys=keys2)
                     if response['status'] == 'OK':
                         response['data'].update(data2)
 
             else:  # ask scheduler to gather data for us
-                response = yield self.scheduler.gather(keys=keys)
+                response = await self.scheduler.gather(keys=keys)
 
             if response['status'] == 'error':
                 logger.warning("Couldn't gather keys %s", response['keys'])
@@ -1278,7 +1265,7 @@ class Client(Node):
 
         data.update(response['data'])
         result = pack_data(futures2, merge(data, bad_data))
-        raise gen.Return(result)
+        return result
 
     def _threaded_gather(self, qin, qout, **kwargs):
         """ Internal function for gathering Queue """
@@ -1354,15 +1341,14 @@ class Client(Node):
             return self.sync(self._gather, futures, errors=errors,
                              direct=direct, local_worker=local_worker)
 
-    @gen.coroutine
-    def _scatter(self, data, workers=None, broadcast=False, direct=None,
+    async def _scatter(self, data, workers=None, broadcast=False, direct=None,
                  local_worker=None, timeout=3):
         if isinstance(workers, six.string_types):
             workers = [workers]
         if isinstance(data, dict) and not all(isinstance(k, (bytes, unicode))
                                               for k in data):
-            d = yield self._scatter(keymap(tokey, data), workers, broadcast)
-            raise gen.Return({k: d[tokey(k)] for k in data})
+            d = await self._scatter(keymap(tokey, data), workers, broadcast)
+            return {k: d[tokey(k)] for k in data}
 
         if isinstance(data, type(range(0))):
             data = list(data)
@@ -1396,7 +1382,7 @@ class Client(Node):
         if local_worker:  # running within task
             local_worker.update_data(data=data, report=False)
 
-            yield self.scheduler.update_data(
+            await self.scheduler.update_data(
                     who_has={key: [local_worker.address] for key in data},
                     nbytes=valmap(sizeof, data),
                     client=self.id)
@@ -1408,24 +1394,24 @@ class Client(Node):
                 start = time()
                 while not ncores:
                     if ncores is not None:
-                        yield gen.sleep(0.1)
+                        await asyncio.sleep(0.1)
                     if time() > start + timeout:
-                        raise gen.TimeoutError("No valid workers found")
-                    ncores = yield self.scheduler.ncores(workers=workers)
+                        raise asyncio.TimeoutError("No valid workers found")
+                    ncores = await self.scheduler.ncores(workers=workers)
                 if not ncores:
                     raise ValueError("No valid workers")
 
-                _, who_has, nbytes = yield scatter_to_workers(ncores, data2,
+                _, who_has, nbytes = await scatter_to_workers(ncores, data2,
                                                               report=False,
                                                               rpc=self.rpc)
 
-                yield self.scheduler.update_data(who_has=who_has,
+                await self.scheduler.update_data(who_has=who_has,
                                                  nbytes=nbytes,
                                                  client=self.id)
             else:
-                yield self.scheduler.scatter(data=data2, workers=workers,
-                                                client=self.id,
-                                                broadcast=broadcast)
+                await self.scheduler.scatter(data=data2, workers=workers,
+                                             client=self.id,
+                                             broadcast=broadcast)
 
         out = {k: self._Future(k, self) for k in data}
         for key, typ in types.items():
@@ -1433,7 +1419,7 @@ class Client(Node):
 
         if direct and broadcast:
             n = None if broadcast is True else broadcast
-            yield self._replicate(list(out.values()), workers=workers, n=n)
+            await self._replicate(list(out.values()), workers=workers, n=n)
 
         if issubclass(input_type, (list, tuple, set, frozenset)):
             out = input_type(out[k] for k in names)
@@ -1441,7 +1427,7 @@ class Client(Node):
         if unpack:
             assert len(out) == 1
             out = list(out.values())[0]
-        raise gen.Return(out)
+        return out
 
     def _threaded_scatter(self, q_or_i, qout, **kwargs):
         """ Internal function for scattering Iterable/Queue data """
@@ -1553,10 +1539,9 @@ class Client(Node):
                              broadcast=broadcast, direct=direct,
                              local_worker=local_worker, timeout=timeout)
 
-    @gen.coroutine
-    def _cancel(self, futures):
+    async def _cancel(self, futures):
         keys = {tokey(f.key) for f in futures_of(futures)}
-        yield self.scheduler.cancel(keys=list(keys), client=self.id)
+        await self.scheduler.cancel(keys=list(keys), client=self.id)
         for k in keys:
             st = self.futures.pop(k, None)
             if st is not None:
@@ -1576,7 +1561,7 @@ class Client(Node):
         """
         return self.sync(self._cancel, futures)
 
-    @gen.coroutine
+    @asyncio.coroutine  # This function was a gen.coroutine, but it doesn't look like it was actually async?
     def _publish_dataset(self, **kwargs):
         with log_errors():
             coroutines = []
@@ -1659,13 +1644,12 @@ class Client(Node):
         """
         return self.sync(self.scheduler.publish_list)
 
-    @gen.coroutine
-    def _get_dataset(self, name):
-        out = yield self.scheduler.publish_get(name=name, client=self.id)
+    async def _get_dataset(self, name):
+        out = await self.scheduler.publish_get(name=name, client=self.id)
 
         with temp_default_client(self):
             data = loads(out['data'])
-        raise gen.Return(data)
+        return data
 
     def get_dataset(self, name):
         """
@@ -1678,15 +1662,14 @@ class Client(Node):
         """
         return self.sync(self._get_dataset, tokey(name))
 
-    @gen.coroutine
-    def _run_on_scheduler(self, function, *args, **kwargs):
-        response = yield self.scheduler.run_function(function=dumps(function),
+    async def _run_on_scheduler(self, function, *args, **kwargs):
+        response = await self.scheduler.run_function(function=dumps(function),
                                                      args=dumps(args),
                                                      kwargs=dumps(kwargs))
         if response['status'] == 'error':
             six.reraise(*clean_exception(**response))
         else:
-            raise gen.Return(response['result'])
+            return response['result']
 
     def run_on_scheduler(self, function, *args, **kwargs):
         """ Run a function on the scheduler process
@@ -1712,22 +1695,21 @@ class Client(Node):
         return self.sync(self._run_on_scheduler, function, *args,
                 **kwargs)
 
-    @gen.coroutine
-    def _run(self, function, *args, **kwargs):
+    async def _run(self, function, *args, **kwargs):
         nanny = kwargs.pop('nanny', False)
         workers = kwargs.pop('workers', None)
-        responses = yield self.scheduler.broadcast(msg=dict(op='run',
-                                                function=dumps(function),
-                                                args=dumps(args),
-                                                kwargs=dumps(kwargs)),
-                                                workers=workers, nanny=nanny)
+        responses = await self.scheduler.broadcast(msg=dict(op='run',
+                                                   function=dumps(function),
+                                                   args=dumps(args),
+                                                   kwargs=dumps(kwargs)),
+                                                   workers=workers, nanny=nanny)
         results = {}
         for key, resp in responses.items():
             if resp['status'] == 'OK':
                 results[key] = resp['result']
             elif resp['status'] == 'error':
                 six.reraise(*clean_exception(**resp))
-        raise gen.Return(results)
+        return results
 
     def run(self, function, *args, **kwargs):
         """
@@ -1764,18 +1746,17 @@ class Client(Node):
         """
         return self.sync(self._run, function, *args, **kwargs)
 
-    @gen.coroutine
-    def _run_coroutine(self, function, *args, **kwargs):
+    async def _run_coroutine(self, function, *args, **kwargs):
         workers = kwargs.pop('workers', None)
         wait = kwargs.pop('wait', True)
-        responses = yield self.scheduler.broadcast(msg=dict(op='run_coroutine',
-                                                function=dumps(function),
-                                                args=dumps(args),
-                                                kwargs=dumps(kwargs),
-                                                wait=wait),
-                                                workers=workers)
+        responses = await self.scheduler.broadcast(msg=dict(op='run_coroutine',
+                                                   function=dumps(function),
+                                                   args=dumps(args),
+                                                   kwargs=dumps(kwargs),
+                                                   wait=wait),
+                                                   workers=workers)
         if not wait:
-            raise gen.Return(None)
+            return None
         else:
             results = {}
             for key, resp in responses.items():
@@ -1783,7 +1764,7 @@ class Client(Node):
                     results[key] = resp['result']
                 elif resp['status'] == 'error':
                     six.reraise(*clean_exception(**resp))
-            raise gen.Return(results)
+            return results
 
     def run_coroutine(self, function, *args, **kwargs):
         """
@@ -2117,10 +2098,9 @@ class Client(Node):
         else:
             return result
 
-    @gen.coroutine
-    def _upload_environment(self, zipfile):
+    async def _upload_environment(self, zipfile):
         name = os.path.split(zipfile)[1]
-        yield self._upload_large_file(zipfile, name)
+        await self._upload_large_file(zipfile, name)
 
         def unzip(dask_worker=None):
             from distributed.utils import log_errors
@@ -2142,22 +2122,21 @@ class Client(Node):
                 assert os.path.exists(os.path.join(c, name[:-4]))
                 return c
 
-        yield self._run(unzip, nanny=True)
-        raise gen.Return(name[:-4])
+        await self._run(unzip, nanny=True)
+        return name[:-4]
 
     def upload_environment(self, name, zipfile):
         return self.sync(self._upload_environment, name, zipfile)
 
-    @gen.coroutine
-    def _restart(self):
+    async def _restart(self):
         self._send_to_scheduler({'op': 'restart'})
         self._restart_event = Event()
-        yield self._restart_event.wait()
+        await self._restart_event.wait()
         self.generation += 1
         with self._refcount_lock:
             self.refcount.clear()
 
-        raise gen.Return(self)
+        return self
 
     def restart(self):
         """ Restart the distributed network
@@ -2167,12 +2146,11 @@ class Client(Node):
         """
         return self.sync(self._restart)
 
-    @gen.coroutine
-    def _upload_file(self, filename, raise_on_error=True):
+    async def _upload_file(self, filename, raise_on_error=True):
         with open(filename, 'rb') as f:
             data = f.read()
         _, fn = os.path.split(filename)
-        d = yield self.scheduler.broadcast(msg={'op': 'upload_file',
+        d = await self.scheduler.broadcast(msg={'op': 'upload_file',
                                                 'filename': fn,
                                                 'data': to_serialize(data)})
 
@@ -2182,21 +2160,20 @@ class Client(Node):
             if raise_on_error:
                 raise exceptions[0]
             else:
-                raise gen.Return(exceptions[0])
+                return exceptions[0]
 
         assert all(len(data) == v['nbytes'] for v in d.values())
 
-    @gen.coroutine
-    def _upload_large_file(self, local_filename, remote_filename=None):
+    async def _upload_large_file(self, local_filename, remote_filename=None):
         if remote_filename is None:
             remote_filename = os.path.split(local_filename)[1]
 
         with open(local_filename, 'rb') as f:
             data = f.read()
 
-        [future] = yield self._scatter([data])
+        [future] = await self._scatter([data])
         key = future.key
-        yield self._replicate(future)
+        await self._replicate(future)
 
         def dump_to_file(dask_worker=None):
             if not os.path.isabs(remote_filename):
@@ -2208,7 +2185,7 @@ class Client(Node):
 
             return len(dask_worker.data[key])
 
-        response = yield self._run(dump_to_file)
+        response = await self._run(dump_to_file)
 
         assert all(len(data) == v for v in response.values())
 
@@ -2237,11 +2214,10 @@ class Client(Node):
         else:
             return result
 
-    @gen.coroutine
-    def _rebalance(self, futures=None, workers=None):
-        yield _wait(futures)
+    async def _rebalance(self, futures=None, workers=None):
+        await _wait(futures)
         keys = list({tokey(f.key) for f in self.futures_of(futures)})
-        result = yield self.scheduler.rebalance(keys=keys, workers=workers)
+        result = await self.scheduler.rebalance(keys=keys, workers=workers)
         assert result['status'] == 'OK'
 
     def rebalance(self, futures=None, workers=None):
@@ -2264,12 +2240,11 @@ class Client(Node):
         """
         return self.sync(self._rebalance, futures, workers)
 
-    @gen.coroutine
-    def _replicate(self, futures, n=None, workers=None, branching_factor=2):
+    async def _replicate(self, futures, n=None, workers=None, branching_factor=2):
         futures = self.futures_of(futures)
-        yield _wait(futures)
+        await _wait(futures)
         keys = {tokey(f.key) for f in futures}
-        yield self.scheduler.replicate(keys=list(keys), n=n, workers=workers,
+        await self.scheduler.replicate(keys=list(keys), n=n, workers=workers,
                 branching_factor=branching_factor)
 
     def replicate(self, futures, n=None, workers=None, branching_factor=2):
@@ -2578,15 +2553,14 @@ class Client(Node):
     def start_ipython(self, *args, **kwargs):
         raise Exception("Method moved to start_ipython_workers")
 
-    @gen.coroutine
-    def _start_ipython_workers(self, workers):
+    async def _start_ipython_workers(self, workers):
         if workers is None:
-            workers = yield self.scheduler.ncores()
+            workers = await self.scheduler.ncores()
 
-        responses = yield self.scheduler.broadcast(
+        responses = await self.scheduler.broadcast(
             msg=dict(op='start_ipython'), workers=workers,
         )
-        raise gen.Return((workers, responses))
+        return workers, responses
 
     def start_ipython_workers(self, workers=None, magic_names=False,
                               qtconsole=False, qtconsole_args=None):
@@ -2779,8 +2753,7 @@ def CompatibleExecutor(*args, **kwargs):
     raise Exception("This has been moved to the Client.get_executor() method")
 
 
-@gen.coroutine
-def _wait(fs, timeout=None, return_when='ALL_COMPLETED'):
+async def _wait(fs, timeout=None, return_when='ALL_COMPLETED'):
     if timeout is not None and not isinstance(timeout, Number):
         raise TypeError("timeout= keyword received a non-numeric value.\n"
                 "Beware that wait expects a list of values\n"
@@ -2789,9 +2762,7 @@ def _wait(fs, timeout=None, return_when='ALL_COMPLETED'):
     fs = futures_of(fs)
     if return_when == 'ALL_COMPLETED':
         future = All({f.event.wait() for f in fs})
-        if timeout is not None:
-            future = gen.with_timeout(timedelta(seconds=timeout), future)
-        yield future
+        await asyncio.wait_for(future, timeout)
         done, not_done = set(fs), set()
         cancelled = [f.key for f in done
                      if f.status == 'cancelled']
@@ -2800,7 +2771,7 @@ def _wait(fs, timeout=None, return_when='ALL_COMPLETED'):
     else:
         raise NotImplementedError("Only return_when='ALL_COMPLETED' supported")
 
-    raise gen.Return(DoneAndNotDoneFutures(done, not_done))
+    return DoneAndNotDoneFutures(done, not_done)
 
 
 ALL_COMPLETED = 'ALL_COMPLETED'
@@ -2824,32 +2795,29 @@ def wait(fs, timeout=None, return_when='ALL_COMPLETED'):
     return result
 
 
-@gen.coroutine
-def _as_completed(fs, queue):
+async def _as_completed(fs, queue):
     fs = futures_of(fs)
     groups = groupby(lambda f: f.key, fs)
     firsts = [v[0] for v in groups.values()]
     wait_iterator = gen.WaitIterator(*[f.event.wait() for f in firsts])
 
     while not wait_iterator.done():
-        yield wait_iterator.next()
+        await wait_iterator.next()
         # TODO: handle case of restarted futures
         future = firsts[wait_iterator.current_index]
         for f in groups[future.key]:
             queue.put_nowait(f)
 
 
-@gen.coroutine
-def _first_completed(futures):
+async def _first_completed(futures):
     """ Return a single completed future
 
     See Also:
         _as_completed
     """
     q = Queue()
-    yield _as_completed(futures, q)
-    result = yield q.get()
-    raise gen.Return(result)
+    await _as_completed(futures, q)
+    return await q.get()
 
 
 class as_completed(object):
@@ -2910,11 +2878,10 @@ class as_completed(object):
         if futures:
             self.update(futures)
 
-    @gen.coroutine
-    def track_future(self, future):
-        yield _wait(future)
+    async def track_future(self, future):
+        await _wait(future)
         if self.with_results:
-            result = yield future._result()
+            result = await future._result()
         with self.lock:
             self.futures[future] -= 1
             if not self.futures[future]:
@@ -2959,13 +2926,12 @@ class as_completed(object):
             raise StopIteration()
         return self.queue.get()
 
-    @gen.coroutine
-    def __anext__(self):
+    async def __anext__(self):
         if not self.futures and self.queue.empty():
             raise StopAsyncIteration  # flake8: noqa
         while self.queue.empty():
-            yield self.condition.wait()
-        raise gen.Return(self.queue.get())
+            await self.condition.wait()
+        return self.queue.get()
 
     next = __next__
 

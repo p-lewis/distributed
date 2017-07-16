@@ -1,16 +1,11 @@
 from __future__ import print_function, division, absolute_import
 
+import asyncio
 from collections import defaultdict
 import logging
-import sys
-import threading
-import time
 from timeit import default_timer
 
-import dask
 from toolz import valmap, groupby, concat
-from tornado.ioloop import PeriodicCallback, IOLoop
-from tornado import gen
 
 from .plugin import SchedulerPlugin
 from ..utils import sync, key_split, tokey, log_errors, key_split_group
@@ -73,7 +68,6 @@ class Progress(SchedulerPlugin):
         self._running = False
         self.status = None
 
-    @gen.coroutine
     def setup(self):
         keys = self.keys
 
@@ -162,12 +156,11 @@ class MultiProgress(Progress):
         Progress.__init__(self, keys, scheduler, minimum=minimum, dt=dt,
                             complete=complete)
 
-    @gen.coroutine
-    def setup(self):
+    async def setup(self):
         keys = self.keys
 
         while not keys.issubset(self.scheduler.tasks):
-            yield gen.sleep(0.05)
+            await asyncio.sleep(0.05)
 
         self.keys = None
 

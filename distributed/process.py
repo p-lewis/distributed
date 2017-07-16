@@ -12,9 +12,11 @@ from multiprocessing.queues import Empty
 from .compatibility import finalize, Queue as PyQueue
 from .utils import mp_context
 
-from tornado import gen
-from tornado.concurrent import Future
-from tornado.ioloop import IOLoop
+# from tornado import gen
+# from tornado.concurrent import Future
+import asyncio
+# from asyncio import Future
+# from tornado.ioloop import IOLoop
 
 
 logger = logging.getLogger(__name__)
@@ -24,9 +26,7 @@ def _call_and_set_future(loop, future, func, *args, **kwargs):
     try:
         res = func(*args, **kwargs)
     except:
-        # Tornado futures are not thread-safe, need to
-        # set_result() / set_exc_info() from the loop's thread
-        loop.add_callback(future.set_exc_info, sys.exc_info())
+        loop.add_callback(future.set_exception, sys.exc_info())
     else:
         loop.add_callback(future.set_result, res)
 
@@ -194,8 +194,7 @@ class AsyncProcess(object):
         self._watch_q.put_nowait({'op': 'terminate', 'future': fut})
         return fut
 
-    @gen.coroutine
-    def join(self, timeout=None):
+    async def join(self, timeout=None):
         """
         Wait for the child process to exit.
 
@@ -206,11 +205,11 @@ class AsyncProcess(object):
         if self._state.exitcode is not None:
             return
         if timeout is None:
-            yield self._exit_future
+            await self._exit_future.result()
         else:
             try:
-                yield gen.with_timeout(timedelta(seconds=timeout), self._exit_future)
-            except gen.TimeoutError:
+                await self._exit_future.result(timeout)
+            except asyncio.TimeoutError:
                 pass
 
     def close(self):

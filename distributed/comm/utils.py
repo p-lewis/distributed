@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 import logging
 import socket
 
-from tornado import gen
+# from tornado import gen
 
 from .. import protocol
 from ..compatibility import finalize
@@ -28,8 +28,7 @@ def offload(fn, *args, **kwargs):
     return _offload_executor.submit(fn, *args, **kwargs)
 
 
-@gen.coroutine
-def to_frames(msg):
+async def to_frames(msg):
     """
     Serialize a message into a list of Distributed protocol frames.
     """
@@ -42,15 +41,14 @@ def to_frames(msg):
             raise
 
     if sizeof(msg) > FRAME_OFFLOAD_THRESHOLD:
-        res = yield offload(_to_frames)
+        res = await offload(_to_frames)
     else:
         res = _to_frames()
 
-    raise gen.Return(res)
+    return res
 
 
-@gen.coroutine
-def from_frames(frames, deserialize=True):
+async def from_frames(frames, deserialize=True):
     """
     Unserialize a list of Distributed protocol frames.
     """
@@ -70,11 +68,11 @@ def from_frames(frames, deserialize=True):
             raise
 
     if deserialize and size > FRAME_OFFLOAD_THRESHOLD:
-        res = yield offload(_from_frames)
+        res = await offload(_from_frames)
     else:
         res = _from_frames()
 
-    raise gen.Return(res)
+    return res
 
 
 def get_tcp_server_address(tcp_server):

@@ -7,11 +7,11 @@ import ssl
 import struct
 import sys
 
-import tornado
-from tornado import gen, netutil
-from tornado.iostream import StreamClosedError
-from tornado.tcpclient import TCPClient
-from tornado.tcpserver import TCPServer
+# import tornado
+# from tornado import gen, netutil
+# from tornado.iostream import StreamClosedError
+# from tornado.tcpclient import TCPClient
+# from tornado.tcpserver import TCPServer
 
 from .. import config
 from ..compatibility import finalize
@@ -126,7 +126,9 @@ class TCP(Comm):
     """
     An established communication based on an underlying Tornado IOStream.
     """
-    _iostream_allows_memoryview = tornado.version_info >= (4, 5)
+    # _iostream_allows_memoryview = tornado.version_info >= (4, 5)
+    # FIXME
+    _iostream_allows_memoryview = True
 
     def __init__(self, stream, local_addr, peer_addr, deserialize=True):
         self._local_addr = local_addr
@@ -160,22 +162,21 @@ class TCP(Comm):
     def peer_address(self):
         return self._peer_addr
 
-    @gen.coroutine
-    def read(self):
+    async def read(self):
         stream = self.stream
         if stream is None:
             raise CommClosedError
 
         try:
-            n_frames = yield stream.read_bytes(8)
+            n_frames = await stream.read_bytes(8)
             n_frames = struct.unpack('Q', n_frames)[0]
-            lengths = yield stream.read_bytes(8 * n_frames)
+            lengths = await stream.read_bytes(8 * n_frames)
             lengths = struct.unpack('Q' * n_frames, lengths)
 
             frames = []
             for length in lengths:
                 if length:
-                    frame = yield stream.read_bytes(length)
+                    frame = await stream.read_bytes(length)
                 else:
                     frame = b''
                 frames.append(frame)
@@ -184,20 +185,19 @@ class TCP(Comm):
             convert_stream_closed_error(self, e)
 
         try:
-            msg = yield from_frames(frames, deserialize=self.deserialize)
+            msg = await from_frames(frames, deserialize=self.deserialize)
         except EOFError:
             # Frames possibly garbled or truncated by communication error
             self.abort()
             raise CommClosedError("aborted stream on truncated data")
-        raise gen.Return(msg)
+        return msg
 
-    @gen.coroutine
-    def write(self, msg):
+    async def write(self, msg):
         stream = self.stream
         if stream is None:
             raise CommClosedError
 
-        frames = yield to_frames(msg)
+        frames = await to_frames(msg)
         if not self._iostream_allows_memoryview:
             frames = [ensure_bytes(f) for f in frames]
 
@@ -215,16 +215,15 @@ class TCP(Comm):
             stream = None
             convert_stream_closed_error(self, e)
 
-        raise gen.Return(sum(map(nbytes, frames)))
+        return sum(map(nbytes, frames))
 
-    @gen.coroutine
-    def close(self):
+    async def close(self):
         stream, self.stream = self.stream, None
         if stream is not None and not stream.closed():
             try:
                 # Flush the stream's write buffer by waiting for a last write.
                 if stream.writing():
-                    yield stream.write(b'')
+                    await stream.write(b'')
                 stream.socket.shutdown(socket.SHUT_RDWR)
             except EnvironmentError:
                 pass
@@ -282,15 +281,14 @@ class RequireEncryptionMixin(object):
 
 class BaseTCPConnector(Connector, RequireEncryptionMixin):
 
-    @gen.coroutine
-    def connect(self, address, deserialize=True, **connection_args):
+    async def connect(self, address, deserialize=True, **connection_args):
         self._check_encryption(address, connection_args)
         ip, port = parse_host_port(address)
         kwargs = self._get_connect_args(**connection_args)
 
         client = TCPClient()
         try:
-            stream = yield client.connect(ip, port,
+            stream = await client.connect(ip, port,
                                           max_buffer_size=MAX_BUFFER_SIZE,
                                           **kwargs)
         except StreamClosedError as e:
@@ -298,10 +296,10 @@ class BaseTCPConnector(Connector, RequireEncryptionMixin):
             convert_stream_closed_error(self, e)
 
         local_address = self.prefix + get_stream_address(stream)
-        raise gen.Return(self.comm_class(stream,
-                                         local_address,
-                                         self.prefix + address,
-                                         deserialize))
+        return self.comm_class(stream,
+                               local_address,
+                               self.prefix + address,
+                               deserialize)
 
 
 class TCPConnector(BaseTCPConnector):
@@ -369,10 +367,9 @@ class BaseTCPListener(Listener, RequireEncryptionMixin):
         if self.tcp_server is None:
             raise ValueError("invalid operation on non-started TCPListener")
 
-    @gen.coroutine
-    def _handle_stream(self, stream, address):
+    async def _handle_stream(self, stream, address):
         address = self.prefix + unparse_host_port(*address[:2])
-        stream = yield self._prepare_stream(stream, address)
+        stream = await self._prepare_stream(stream, address)
         if stream is None:
             # Preparation failed
             return
@@ -418,9 +415,8 @@ class TCPListener(BaseTCPListener):
     def _get_server_args(self, **connection_args):
         return {}
 
-    @gen.coroutine
-    def _prepare_stream(self, stream, address):
-        raise gen.Return(stream)
+    async def _prepare_stream(self, stream, address):
+        return stream
 
 
 class TLSListener(BaseTCPListener):
@@ -432,17 +428,16 @@ class TLSListener(BaseTCPListener):
         ctx = _expect_tls_context(connection_args)
         return {'ssl_options': ctx}
 
-    @gen.coroutine
-    def _prepare_stream(self, stream, address):
+    async def _prepare_stream(self, stream, address):
         try:
-            yield stream.wait_for_handshake()
+            await stream.wait_for_handshake()
         except EnvironmentError as e:
             # The handshake went wrong, log and ignore
             logger.warning("Listener on %r: TLS handshake failed with remote %r: %s",
                            self.listen_address, address,
                            getattr(e, "real_error", None) or e)
         else:
-            raise gen.Return(stream)
+            return stream
 
 
 class BaseTCPBackend(Backend):

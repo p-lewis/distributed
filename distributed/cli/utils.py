@@ -11,7 +11,8 @@ environment variables, though exact solutions may depend on your system:
 For more information see: http://click.pocoo.org/5/python3/
 """.strip()
 
-
+import sys
+import asyncio
 from distributed.comm import (parse_address, unparse_address,
                               parse_host_port, unparse_host_port)
 from ..utils import get_ip, ensure_ip
@@ -32,11 +33,13 @@ def check_python_3():
 def install_signal_handlers():
     """Install global signal handlers to halt the Tornado IOLoop in case of
     a SIGINT or SIGTERM."""
-    from tornado.ioloop import IOLoop
+    import asyncio
     import signal
 
     def handle_signal(sig, frame):
-        IOLoop.instance().add_callback_from_signal(IOLoop.instance().stop)
+        loop = asyncio.get_event_loop()
+        loop.add_signal_handler(sig, loop.stop)
+        # IOLoop.instance().add_callback_from_signal(IOLoop.instance().stop)
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
@@ -69,3 +72,8 @@ def uri_from_host_port(host_arg, port_arg, default_port):
     addr = unparse_address(scheme, loc)
 
     return addr
+
+
+def set_asyncio_policy():
+    if sys.platform == 'win32':
+        asyncio.set_event_loop(asyncio.ProactorEventLoop())

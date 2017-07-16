@@ -1,10 +1,8 @@
 from __future__ import print_function, division, absolute_import
 
 import logging
+from ..tornado_shim import PeriodicCallback
 from ..utils import log_errors
-
-from tornado import gen
-from tornado.ioloop import PeriodicCallback
 
 logger = logging.getLogger(__name__)
 
@@ -61,19 +59,15 @@ class Adaptive(object):
 
             return False
 
-    @gen.coroutine
-    def _retire_workers(self):
+    async def _retire_workers(self):
         with log_errors():
-            workers = yield self.scheduler.retire_workers(remove=True,
-                    close_workers=True)
-
+            workers = await self.scheduler.retire_workers(remove=True, close_workers=True)
             logger.info("Retiring workers %s", workers)
             f = self.cluster.scale_down(workers)
             if gen.is_future(f):
-                yield f
+                await f
 
-    @gen.coroutine
-    def _adapt(self):
+    async def _adapt(self):
         if self._adapting:  # Semaphore to avoid overlapping adapt calls
             return
 
@@ -84,9 +78,9 @@ class Adaptive(object):
                 logger.info("Scaling up to %d workers", instances)
                 f = self.cluster.scale_up(instances)
                 if gen.is_future(f):
-                    yield f
+                    await f
 
-            yield self._retire_workers()
+            await self._retire_workers()
         finally:
             self._adapting = False
 
